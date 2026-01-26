@@ -1,0 +1,28 @@
+# Ignore the entire data folder
+data/
+
+# Ignore Python environment files
+*.pyc
+__pycache__/
+*.env
+*.db
+
+# Ignore logs and backups
+*.log
+*.bak
+*.backup
+
+# Ignore Docker-related temporary files
+.dockerignore
+docker-compose.override.yml
+
+# Ignore system files
+.DS_Store
+
+# Ignore specific files and directories
+mlflow.db
+airflow/
+
+# Ignore other possible temporary or sensitive files
+*.swp
+

@@ -1,0 +1,220 @@
+version: "3.8"
+
+services:
+
+  # MariaDB ColumnStore (for storage, depending on your usage)
+  mariadb-columnstore:
+    image: mariadb/columnstore
+    container_name: mcs1
+    hostname: mcs1
+    privileged: true
+    ipc: host
+    shm_size: "2g"
+    ports:
+      - "3306:3306"
+      - "8640:8640"  # CMAPI
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_ROOT_HOST: "%"
+      CLUSTER: "false"
+      PM1: "127.0.0.1"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - columnstore_data:/var/lib/columnstore
+      - ./init_mariadb.sh:/docker-entrypoint-initdb.d/init_mariadb.sh:ro
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -uroot -p$${MARIADB_ROOT_PASSWORD} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 90s
+
+  # PostgreSQL for Airflow and MLflow metadata
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    hostname: postgres_db
+    restart: always
+    shm_size: 128mb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+
+  # Airflow Webserver
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: airflow-webserver:latest
+    container_name: airflow_webserver
+    hostname: airflow_webserver
+    restart: always
+    user: "0:0"
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db:5432/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      - AIRFLOW__WEBSERVER__BASE_URL=http://airflow-webserver:8080  
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ./src:/opt/airflow/src
+      - ./gx:/opt/airflow/gx
+      - ./mlflow_artifacts:/mlflow_artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: bash -c "chown -R airflow:root /opt/airflow/logs && chmod -R 775 /opt/airflow/logs && su airflow -c 'airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true && airflow webserver'"
+
+  # Airflow Scheduler
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: airflow-scheduler:latest
+    container_name: airflow_scheduler
+    hostname: airflow_scheduler
+    restart: always
+    user: "0:0"
+    environment:
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db:5432/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+      - ./src:/opt/airflow/src
+      - ./gx:/opt/airflow/gx
+      - ./mlflow_artifacts:/opt/airflow/mlflow_artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: bash -c "chown -R airflow:root /opt/airflow/logs && chmod -R 775 /opt/airflow/logs && su airflow -c 'airflow scheduler'"
+
+  # Airflow Worker
+  # airflow-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   image: airflow-worker:latest
+  #   container_name: airflow_worker
+  #   hostname: airflow_worker
+  #   restart: always
+  #   user: "0:0"
+  #   environment:
+  #     - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db:5432/airflow
+  #     - AIRFLOW__CELERY__BROKER_URL=redis://:mysecurepassword@redis1:6379/0
+  #     - AIRFLOW__CELERY__RESULT_BACKEND=redis://:mysecurepassword@redis1:6379/0
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   command: celery worker -A airflow.jobs.celery_worker --loglevel=info
+
+  # Redis 
+  redis:
+    image: redis:latest
+    container_name: redis1
+    hostname: redis1
+    ports:
+      - "6379:6379"
+    restart: always
+    environment:
+      - REDIS_PASSWORD=mysecurepassword
+    command: ["redis-server", "--requirepass", "mysecurepassword"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "mysecurepassword", "ping"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+
+  # MLflow Server
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: mlflow-server:latest
+    container_name: mlflow_server
+    user: root
+    hostname: mlflow_server
+    restart: always
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+    volumes:
+      - ./mlflow_artifacts:/opt/airflow/mlflow_artifacts
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql+psycopg2://airflow:airflow@postgres_db:5432/mlflow
+      --default-artifact-root file:///opt/airflow/mlflow_artifacts
+
+  # FastAPI Application (Development)
+  fastapi-app:
+    build: .
+    container_name: fastapi_app
+    ports:
+      - "8000:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+      - REDIS_HOST=redis1
+      - REDIS_PASSWORD=mysecurepassword
+    volumes:
+      - ./src:/opt/airflow/src
+      - ./mlflow_artifacts:/mlflow_artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+      mlflow-server:
+        condition: service_started
+    command: bash -c "cd /opt/airflow && uvicorn src.api_main:app --host 0.0.0.0 --port 8000 --reload"
+    restart: always
+
+  # FastAPI Application (Production with MLflow Model Registry)
+  fastapi-production:
+    build: .
+    container_name: fastapi_production
+    ports:
+      - "8001:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+      - REDIS_HOST=redis1
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=mysecurepassword
+      - MODEL_NAME=lending_club_xgboost_model
+      - MODEL_STAGE=Production
+    volumes:
+      - ./src:/opt/airflow/src
+      - ./mlflow_artifacts:/mlflow_artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+      mlflow-server:
+        condition: service_started
+    command: bash -c "cd /opt/airflow && uvicorn src.api_production:app --host 0.0.0.0 --port 8000 --reload"
+    restart: always
+
+volumes:
+  mariadb_data:
+  columnstore_data:
+  postgres_data:
+  mlflow_artifacts:

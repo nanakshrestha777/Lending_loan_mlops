@@ -1,0 +1,14 @@
+artifact_uri: file:///home/student/CMP6230_Coursework/notebook/mlruns/743403401502738087/3591c23a23e64d91a245bcff3a955071/artifacts
+end_time: 1767704663081
+entry_point_name: ''
+experiment_id: '743403401502738087'
+lifecycle_stage: active
+run_id: 3591c23a23e64d91a245bcff3a955071
+run_name: judicious-grouse-34
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1767704583990
+status: 4
+tags: []
+user_id: student

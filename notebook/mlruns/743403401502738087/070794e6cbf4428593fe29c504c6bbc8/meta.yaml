@@ -1,0 +1,14 @@
+artifact_uri: file:///home/student/CMP6230_Coursework/notebook/mlruns/743403401502738087/070794e6cbf4428593fe29c504c6bbc8/artifacts
+end_time: 1767705116711
+entry_point_name: ''
+experiment_id: '743403401502738087'
+lifecycle_stage: active
+run_id: 070794e6cbf4428593fe29c504c6bbc8
+run_name: learned-stork-767
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1767704954157
+status: 3
+tags: []
+user_id: student

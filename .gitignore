@@ -26,3 +26,15 @@ airflow/
 # Ignore other possible temporary or sensitive files
 *.swp
 
+
+# Ignore mlflow artifacts
+mlflow_artifacts/
+
+# Ignore notebook checkpoints
+**/.ipynb_checkpoints/
+
+# Ignore large model files (if you don't need to track them)
+**/*.pkl
+**/*.h5
+**/*.joblib
+

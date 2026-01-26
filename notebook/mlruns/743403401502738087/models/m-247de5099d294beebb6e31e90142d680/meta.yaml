@@ -1,0 +1,10 @@
+artifact_location: file:///home/student/CMP6230_Coursework/notebook/mlruns/743403401502738087/models/m-247de5099d294beebb6e31e90142d680/artifacts
+creation_timestamp: 1767704663075
+experiment_id: '743403401502738087'
+last_updated_timestamp: 1767704663080
+model_id: m-247de5099d294beebb6e31e90142d680
+model_type: null
+name: logistic_regression_model
+source_run_id: 3591c23a23e64d91a245bcff3a955071
+status: 3
+status_message: null

@@ -21,6 +21,7 @@ services:
     volumes:
       - mariadb_data:/var/lib/mysql
       - columnstore_data:/var/lib/columnstore
+      - ./provision-wrapper.sh:/docker-entrypoint-initdb.d/99-provision.sh:ro
       - ./init_mariadb.sh:/docker-entrypoint-initdb.d/init_mariadb.sh:ro
     restart: always
     healthcheck:
@@ -70,6 +71,7 @@ services:
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
       - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
       - AIRFLOW__WEBSERVER__BASE_URL=http://airflow-webserver:8080  
+      - GX_ENABLE_FLUENT_DATASOURCES=False
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
@@ -96,6 +98,7 @@ services:
       - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres_db:5432/airflow
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - GX_ENABLE_FLUENT_DATASOURCES=False
 
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -169,49 +172,49 @@ services:
       --default-artifact-root file:///opt/airflow/mlflow_artifacts
 
   # FastAPI Application (Development)
-  fastapi-app:
-    build: .
-    container_name: fastapi_app
-    ports:
-      - "8000:8000"
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
-      - REDIS_HOST=redis1
-      - REDIS_PASSWORD=mysecurepassword
-    volumes:
-      - ./src:/opt/airflow/src
-      - ./mlflow_artifacts:/mlflow_artifacts
-    depends_on:
-      redis:
-        condition: service_healthy
-      mlflow-server:
-        condition: service_started
-    command: bash -c "cd /opt/airflow && uvicorn src.api_main:app --host 0.0.0.0 --port 8000 --reload"
-    restart: always
+  # fastapi-app:
+  #   build: .
+  #   container_name: fastapi_app
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+  #     - REDIS_HOST=redis1
+  #     - REDIS_PASSWORD=mysecurepassword
+  #   volumes:
+  #     - ./src:/opt/airflow/src
+  #     - ./mlflow_artifacts:/mlflow_artifacts
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     mlflow-server:
+  #       condition: service_started
+  #   command: bash -c "cd /opt/airflow && uvicorn src.api_main:app --host 0.0.0.0 --port 8000 --reload"
+  #   restart: always
 
   # FastAPI Application (Production with MLflow Model Registry)
-  fastapi-production:
-    build: .
-    container_name: fastapi_production
-    ports:
-      - "8001:8000"
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
-      - REDIS_HOST=redis1
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=mysecurepassword
-      - MODEL_NAME=lending_club_xgboost_model
-      - MODEL_STAGE=Production
-    volumes:
-      - ./src:/opt/airflow/src
-      - ./mlflow_artifacts:/mlflow_artifacts
-    depends_on:
-      redis:
-        condition: service_healthy
-      mlflow-server:
-        condition: service_started
-    command: bash -c "cd /opt/airflow && uvicorn src.api_production:app --host 0.0.0.0 --port 8000 --reload"
-    restart: always
+  # fastapi-production:
+  #   build: .
+  #   container_name: fastapi_production
+  #   ports:
+  #     - "8001:8000"
+  #   environment:
+  #     - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+  #     - REDIS_HOST=redis1
+  #     - REDIS_PORT=6379
+  #     - REDIS_PASSWORD=mysecurepassword
+  #     - MODEL_NAME=lending_club_xgboost_model
+  #     - MODEL_STAGE=Production
+  #   volumes:
+  #     - ./src:/opt/airflow/src
+  #     - ./mlflow_artifacts:/mlflow_artifacts
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #     mlflow-server:
+  #       condition: service_started
+  #   command: bash -c "cd /opt/airflow && uvicorn src.api_production:app --host 0.0.0.0 --port 8000 --reload"
+  #   restart: always
 
 volumes:
   mariadb_data:

@@ -29,23 +29,34 @@ logger = logging.getLogger("LendingAPI")
 app = FastAPI(title="Lending Club MLOps API")
 
 # 2. Configuration
-MLFLOW_URI = "http://127.0.0.1:5000"
-LOCAL_ARTIFACT_ROOT = "/home/nanak/mlops/mlflow_artifacts"
-REFERENCE_DATA_PATH = "/home/nanak/mlops/data/transformed.parquet"
-r = redis.Redis(host='127.0.0.1', port=6379, password='mysecurepassword', decode_responses=True)
+# Use environment variables to support both Docker and local development
+MLFLOW_URI = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+LOCAL_ARTIFACT_ROOT = os.getenv("ARTIFACT_ROOT", "/home/nanak/mlops/mlflow_artifacts")
+REFERENCE_DATA_PATH = os.getenv("REFERENCE_DATA", "/home/nanak/mlops/data/transformed.parquet")
 
-# PostgreSQL Configuration
+# Redis Configuration - supports Docker (redis1) and local (127.0.0.1)
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "mysecurepassword")
+r = redis.Redis(host=REDIS_HOST, port=6379, password=REDIS_PASSWORD, decode_responses=True)
+
+# PostgreSQL Configuration - supports Docker (postgres_db) and local (localhost)
 POSTGRES_CONFIG = {
-    'host': 'localhost',
-    'port': 5432,
-    'database': 'airflow',
-    'user': 'airflow',
-    'password': 'airflow'
+    'host': os.getenv("POSTGRES_HOST", "127.0.0.1"), # Use IP
+    'port': int(os.getenv("POSTGRES_PORT", "5432")),
+    'database': os.getenv("POSTGRES_DB", "airflow"),
+    'user': os.getenv("POSTGRES_USER", "airflow"),
+    'password': os.getenv("POSTGRES_PASSWORD", "airflow"),
+    'connect_timeout': 5,
+    'gssencmode': 'disable' # Prevents GSSAPI handshake issues
 }
 
 def get_db_connection():
     """Get PostgreSQL database connection"""
-    return psycopg2.connect(**POSTGRES_CONFIG)
+    try:
+        return psycopg2.connect(**POSTGRES_CONFIG)
+    except Exception as e:
+        logger.error(f"Postgres Connection Detail Error: {e}")
+        raise e
 
 # Global Assets
 model = None
@@ -92,13 +103,17 @@ def load_assets():
     
     try:
         mlflow.set_tracking_uri(MLFLOW_URI)
-        # Search Experiment ID 2
-        runs = mlflow.search_runs(experiment_ids=["2"], order_by=["metrics.f1_score DESC"])
+        # Search Experiment ID 2 - Get MOST RECENT run (not just best F1)
+        runs = mlflow.search_runs(experiment_ids=["2"], order_by=["start_time DESC"])
         
         if not runs.empty:
+            # Use the most recent run
             best_run = runs.iloc[0]
             run_id = best_run.run_id
             run_folder = os.path.join(LOCAL_ARTIFACT_ROOT, "2", run_id, "artifacts")
+            
+            logger.info(f"📦 Loading most recent model from run: {run_id}")
+            logger.info(f"   Start time: {best_run.get('start_time', 'N/A')}")
             
             # Store model metadata
             model_metadata = {
@@ -117,33 +132,71 @@ def load_assets():
                 scaling_params = json.load(f)
             
             # --- Load Reference Data (Baseline) ---
+            logger.info(f"📂 Loading reference data from: {REFERENCE_DATA_PATH}")
             if os.path.exists(REFERENCE_DATA_PATH):
-                raw_ref_df = pd.read_parquet(REFERENCE_DATA_PATH)
-                
-                # Transform baseline to match the 6-feature model
-                ref_p = pd.DataFrame()
-                ref_p['grade_rank'] = raw_ref_df['grade'].map({"A": 1, "B": 2, "C": 3, "D": 4}).fillna(5)
-                ref_p['is_rent'] = (raw_ref_df['home_ownership'] == 'RENT').astype(int)
-                ref_p['fico_scaled'] = (raw_ref_df['fico_score'] - 300) / 550.0
-                ref_p['rate_scaled'] = raw_ref_df['int_rate'] / 35.0
-                ref_p['dti_scaled'] = raw_ref_df['dti'] / 100.0
-                
-                # Income scaling using the logic from your training
-                inc_log = (1 + raw_ref_df['annual_inc']).apply(math.log)
-                m_inc = scaling_params.get('min_inc_log') or scaling_params.get('min_inc') or 0
-                mx_inc = scaling_params.get('max_inc_log') or scaling_params.get('max_inc') or 15
-                
-                # Add epsilon to prevent division by zero in scaling
-                ref_p['income_scaled'] = (inc_log - m_inc) / (mx_inc - m_inc + 1e-9)
-                
-                # Final Clean: Drop any NaNs/Infs that might break statistical tests
-                reference_df = ref_p.replace([np.inf, -np.inf], np.nan).dropna().astype(float)
-                
-                logger.info(f"✅ Baseline Ready: {len(reference_df)} rows")
+                try:
+                    raw_ref_df = pd.read_parquet(REFERENCE_DATA_PATH)
+                    logger.info(f"📊 Raw reference data loaded: {len(raw_ref_df)} rows")
+                    
+                    # Check if required columns exist
+                    required_cols = ['grade', 'home_ownership', 'fico_score', 'int_rate', 'dti', 'annual_inc']
+                    missing_cols = [col for col in required_cols if col not in raw_ref_df.columns]
+                    if missing_cols:
+                        logger.error(f"❌ Missing columns in reference data: {missing_cols}")
+                        logger.error(f"   Available columns: {list(raw_ref_df.columns)}")
+                        raise ValueError(f"Missing required columns: {missing_cols}")
+                    
+                    # Transform baseline to match the 6-feature model
+                    ref_p = pd.DataFrame()
+                    ref_p['grade_rank'] = raw_ref_df['grade'].map({"A": 1, "B": 2, "C": 3, "D": 4}).fillna(5)
+                    ref_p['is_rent'] = (raw_ref_df['home_ownership'] == 'RENT').astype(int)
+                    ref_p['fico_scaled'] = (raw_ref_df['fico_score'] - 300) / 550.0
+                    ref_p['rate_scaled'] = raw_ref_df['int_rate'] / 35.0
+                    ref_p['dti_scaled'] = raw_ref_df['dti'] / 100.0
+                    
+                    # Income scaling using the logic from your training
+                    inc_log = (1 + raw_ref_df['annual_inc']).apply(math.log)
+                    m_inc = scaling_params.get('min_inc_log') or scaling_params.get('min_inc') or 0
+                    mx_inc = scaling_params.get('max_inc_log') or scaling_params.get('max_inc') or 15
+                    
+                    # Add epsilon to prevent division by zero in scaling
+                    ref_p['income_scaled'] = (inc_log - m_inc) / (mx_inc - m_inc + 1e-9)
+                    
+                    # Final Clean: Drop any NaNs/Infs that might break statistical tests
+                    reference_df = ref_p.replace([np.inf, -np.inf], np.nan).dropna().astype(float)
+                    
+                    logger.info(f"✅ Baseline Ready: {len(reference_df)} rows")
+                except Exception as ref_error:
+                    logger.error(f"❌ Failed to load/transform reference data: {ref_error}")
+                    logger.error(f"   File: {REFERENCE_DATA_PATH}")
+                    reference_df = None
+            else:
+                logger.warning(f"⚠️ Reference data file not found: {REFERENCE_DATA_PATH}")
+                reference_df = None
             
             logger.info(f"✅ API READY. Model Run: {run_id}")
+        else:
+            logger.warning("⚠️ No MLflow runs found in experiment 2")
+            
     except Exception as e:
         logger.error(f"💥 Startup Error: {e}")
+        
+        # Provide helpful troubleshooting info
+        if "binary format has been deprecated" in str(e):
+            logger.error("=" * 60)
+            logger.error("🔧 XGBoost Version Mismatch Detected!")
+            logger.error("   Your model was saved with an older XGBoost version.")
+            logger.error("   ")
+            logger.error("   SOLUTION: Re-run your Airflow DAG to retrain the model:")
+            logger.error("   docker exec airflow_webserver airflow dags trigger test__dag")
+            logger.error("   ")
+            logger.error("   Or check Airflow UI: http://localhost:8080")
+            logger.error("=" * 60)
+        
+        # Don't let API crash completely - it can still handle health checks
+        model = None
+        scaling_params = None
+        reference_df = None
 
 class LoanRequest(BaseModel):
     grade: str
@@ -219,6 +272,76 @@ def predict(user_input: LoanRequest):
         logger.error(f"❌ Predict Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/predict/batch")
+def predict_batch(requests: List[LoanRequest]):
+    """Batch prediction endpoint - accepts multiple loan requests at once"""
+    if not model or not scaling_params:
+        raise HTTPException(status_code=503, detail="Assets not loaded")
+    
+    results = []
+    for user_input in requests:
+        try:
+            # Pre-processing
+            g_rank = {"A": 1, "B": 2, "C": 3, "D": 4}.get(user_input.grade.upper(), 5)
+            rent_flag = 1 if user_input.home_ownership.upper() == "RENT" else 0
+            inc_log = math.log(1 + user_input.annual_inc)
+            m_inc = scaling_params.get('min_inc_log') or scaling_params.get('min_inc') or 0
+            mx_inc = scaling_params.get('max_inc_log') or scaling_params.get('max_inc') or 15
+            inc_scaled = (inc_log - m_inc) / (mx_inc - m_inc + 1e-9)
+
+            features_dict = {
+                "grade_rank": float(g_rank), 
+                "is_rent": float(rent_flag),
+                "fico_scaled": float((user_input.fico_score - 300) / 550.0),
+                "rate_scaled": float(user_input.int_rate / 35.0),
+                "dti_scaled": float(user_input.dti / 100.0),
+                "income_scaled": float(inc_scaled)
+            }
+            
+            live_buffer.append(features_dict)
+            if len(live_buffer) > 500: live_buffer.pop(0)
+
+            pred = int(model.predict(pd.DataFrame([features_dict]))[0])
+            result = "REJECT" if pred == 1 else "APPROVE"
+            
+            prediction_history.append({
+                'timestamp': datetime.now().isoformat(),
+                'input': user_input.dict(),
+                'prediction': result,
+                'confidence': float(pred)
+            })
+            
+            # Store in PostgreSQL
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO loan_predictions 
+                    (grade, home_ownership, fico_score, annual_inc, int_rate, dti, 
+                     prediction, confidence, grade_rank, is_rent, fico_scaled, 
+                     rate_scaled, dti_scaled, income_scaled)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    user_input.grade, user_input.home_ownership, user_input.fico_score,
+                    user_input.annual_inc, user_input.int_rate, user_input.dti,
+                    result, float(pred), features_dict['grade_rank'], features_dict['is_rent'],
+                    features_dict['fico_scaled'], features_dict['rate_scaled'],
+                    features_dict['dti_scaled'], features_dict['income_scaled']
+                ))
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as db_error:
+                logger.error(f"⚠️ PostgreSQL insert error: {db_error}")
+            
+            r.incr("api:predict_count")
+            results.append({"input": user_input.dict(), "prediction": result, "confidence": float(pred)})
+        except Exception as e:
+            logger.error(f"❌ Batch Predict Error for request: {e}")
+            results.append({"input": user_input.dict(), "error": str(e)})
+    
+    return {"total": len(results), "results": results}
+
 @app.get("/monitor/drift")
 def get_drift():
     try:
@@ -247,6 +370,18 @@ def get_drift():
         current_df = pd.DataFrame(rows, columns=[
             'grade_rank', 'is_rent', 'fico_scaled', 'rate_scaled', 'dti_scaled', 'income_scaled'
         ]).astype(float)
+        
+        # Check if reference data is loaded
+        if reference_df is None or len(reference_df) == 0:
+            return HTMLResponse(content=f"""
+                <h1>Reference Data Not Available</h1>
+                <p>Reference baseline data is not loaded. Please check:</p>
+                <ul>
+                    <li>File exists: {REFERENCE_DATA_PATH}</li>
+                    <li>Check API startup logs for errors</li>
+                    <li>Ensure the DAG has run successfully to create transformed.parquet</li>
+                </ul>
+            """)
         
         # Sample Reference Data (baseline)
         reference_sample = reference_df.sample(n=min(5000, len(reference_df)), random_state=42)
@@ -1030,8 +1165,33 @@ def model_metrics_ui():
 
 @app.get("/api/history")
 def get_history():
-    """API endpoint to get prediction history"""
-    return JSONResponse(content=list(prediction_history))
+    """API endpoint to get prediction history from PostgreSQL"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT id, timestamp, grade, home_ownership, fico_score, 
+                   annual_inc, int_rate, dti, prediction, confidence
+            FROM loan_predictions 
+            ORDER BY timestamp DESC 
+            LIMIT 1000
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        # Convert to list of dicts and format timestamps
+        results = []
+        for row in rows:
+            row_dict = dict(row)
+            if row_dict.get('timestamp'):
+                row_dict['timestamp'] = row_dict['timestamp'].isoformat()
+            results.append(row_dict)
+        
+        return JSONResponse(content=results)
+    except Exception as e:
+        logger.error(f"❌ Error fetching history: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/api/history/clear")
 def clear_history():
